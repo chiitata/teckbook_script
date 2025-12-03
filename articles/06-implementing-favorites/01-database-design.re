@@ -67,3 +67,289 @@ create policy "Users can delete their own favorites." on public.favorites
 これらのポリシーにより、「自分のお気に入りデータは、自分しか閲覧・追加・削除できない」という、お気に入り機能にとって不可欠なセキュリティがデータベースレベルで実現されます。
 
 これで、お気に入り情報を格納する準備が整いました。次のセクションでは、検索結果の動画に「お気に入り」ボタンを追加し、ボタンが押されたらこの`favorites`テーブルにデータを登録する処理を実装します。
+== お気に入り登録処理の実装
+
+データベースの準備ができたので、次はお気に入り登録の具体的な処理を実装します。検索結果として表示された動画に「お気に入り」ボタンを設置し、クリックされたら`favorites`テーブルにデータを保存する流れを作ります。
+
+=== お気に入り追加・削除のServer Actions
+
+まず、`favorites`テーブルを操作するためのServer Actionsを`src/app/actions.ts`に追記します。
+
+```ts
+# src/app/actions.ts
+"use server"
+
+import { createServerActionClient } from "@supabase/auth-helpers-nextjs"
+import { cookies } from "next/headers"
+# ... (searchVideosなど)
+
+# お気に入り追加
+export const addFavorite = async (video: youtube_v3.Schema$SearchResult) => {
+  const supabase = createServerActionClient({ cookies })
+  const { data: { user } } = await supabase.auth.getUser()
+
+  if (!user) {
+    return { error: "ログインが必要です。" }
+  }
+
+  const { error } = await supabase.from("favorites").insert({
+    user_id: user.id,
+    video_id: video.id?.videoId,
+    video_title: video.snippet?.title,
+    thumbnail_url: video.snippet?.thumbnails?.medium?.url,
+  })
+
+  if (error) {
+    console.error(error)
+    return { error: "お気に入り登録に失敗しました。" }
+  }
+
+  return { success: true }
+}
+
+# お気に入り削除
+export const removeFavorite = async (videoId: string) => {
+  const supabase = createServerActionClient({ cookies })
+  const { data: { user } } = await supabase.auth.getUser()
+
+  if (!user) {
+    return { error: "ログインが必要です。" }
+  }
+
+  const { error } = await supabase
+    .from("favorites")
+    .delete()
+    .match({ user_id: user.id, video_id: videoId })
+
+  if (error) {
+    console.error(error)
+    return { error: "お気に入り解除に失敗しました。" }
+  }
+
+  return { success: true }
+}
+```
+
+**コードの解説:**
+
+ * **`createServerActionClient`**: Server Actions内でSupabaseクライアントを初期化するための関数です。`cookies`を渡すことで、サーバー側で現在のユーザーの認証状態を正しく認識できます。
+ * **`supabase.auth.getUser()`**: 現在ログインしているユーザーの情報を取得します。ユーザーが存在しない場合はエラーを返します。
+ * **`supabase.from("favorites").insert(...)`**: `favorites`テーブルに新しいレコードを挿入します。`user_id`や動画の情報をオブジェクトとして渡します。
+ * **`supabase.from("favorites").delete().match(...)`**: `favorites`テーブルからレコードを削除します。`match`で、`user_id`と`video_id`が一致するレコードのみを削除対象としています。
+
+=== お気に入りボタンコンポーネントの作成
+
+次に、お気に入りボタン自体をコンポーネントとして切り出します。このボタンは、自分がその動画を既にお気に入り登録しているかどうかを知る必要があります。
+
+`src/components`に`FavoriteButton.tsx`を作成します。
+
+```tsx
+# src/components/FavoriteButton.tsx
+"use client"
+
+import { useState } from "react"
+import { addFavorite, removeFavorite } from "@/app/actions"
+import type { youtube_v3 } from "googleapis"
+
+interface FavoriteButtonProps {
+  video: youtube_v3.Schema$SearchResult
+  isFavorited: boolean
+}
+
+const FavoriteButton = ({ video, isFavorited }: FavoriteButtonProps) => {
+  const [favorited, setFavorited] = useState(isFavorited)
+  const [loading, setLoading] = useState(false)
+
+  const handleClick = async () => {
+    setLoading(true)
+    if (favorited) {
+      await removeFavorite(video.id!.videoId!)
+      setFavorited(false)
+    } else {
+      await addFavorite(video)
+      setFavorited(true)
+    }
+    setLoading(false)
+  }
+
+  return (
+    <button
+      onClick={handleClick}
+      disabled={loading}
+      className={`w-full mt-2 px-4 py-2 text-white font-semibold rounded ${favorited ? "bg-red-500 hover:bg-red-600" : "bg-blue-500 hover:bg-blue-600"}`}>
+      {loading ? "処理中..." : favorited ? "お気に入りから削除" : "お気に入りに追加"}
+    </button>
+  )
+}
+
+export default FavoriteButton
+```
+
+このコンポーネントは、動画情報（`video`）と、その動画が既にお気に入り済みかどうかの真偽値（`isFavorited`）をpropsとして受け取ります。
+ボタンがクリックされたら、`isFavorited`の状態に応じて`addFavorite`または`removeFavorite`アクションを呼び出し、自身の状態を更新します。
+
+=== ホームページへの組み込み
+
+最後に、この`FavoriteButton`をホームページに組み込みます。そのためには、ホームページ側で「どの動画がお気に入り済みか」という情報を持っている必要があります。
+
+この処理は少し複雑になるため、次章の「マイページ」の実装と合わせて解説します。現段階では、まずはお気に入り登録のロジックが完成したことを理解してください。
+
+次のセクションでは、お気に入りに登録した動画を一覧表示する「マイページ」を作成します。
+== マイページの作成
+
+お気に入りに登録した動画を一覧で確認できる「マイページ」を作成します。このページは、ログインしているユーザーだけがアクセスできるように設定します。
+
+=== Server Componentでのデータ取得
+
+マイページでは、サーバーサイドでSupabaseからお気に入り動画のリストを取得します。`src/app`に`mypage`ディレクトリを作成し、その中に`page.tsx`を作成してください。
+
+```tsx
+# src/app/mypage/page.tsx
+import { createServerComponentClient } from "@supabase/auth-helpers-nextjs"
+import { cookies } from "next/headers"
+import { redirect } from "next/navigation"
+
+export default async function MyPage() {
+  const supabase = createServerComponentClient({ cookies })
+
+  # ログインユーザーのセッションを取得
+  const { data: { session } } = await supabase.auth.getSession()
+
+  # 未ログイン場合はログインページにリダイレクト
+  if (!session) {
+    redirect("/login")
+  }
+
+  # favoritesテーブルからデータを取得
+  const { data: favorites, error } = await supabase
+    .from("favorites")
+    .select("*")
+    .order("created_at", { ascending: false })
+
+  if (error) {
+    console.error("Error fetching favorites:", error)
+  }
+
+  return (
+    <div className="container mx-auto p-4">
+      <h1 className="text-2xl font-bold mb-4">お気に入り一覧</h1>
+      {favorites && favorites.length > 0 ? (
+        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
+          {favorites.map((fav) => (
+            <div key={fav.video_id} className="border rounded-lg p-4 text-left">
+              <img
+                src={fav.thumbnail_url}
+                alt={fav.video_title}
+                className="w-full rounded-md mb-2"
+              />
+              <h3 className="font-bold">{fav.video_title}</h3>
+              {/* ここにお気に入り解除ボタンを後で追加 */}
+            </div>
+          ))}
+        </div>
+      ) : (
+        <p>お気に入りに登録された動画はありません。</p>
+      )}
+    </div>
+  )
+}
+```
+
+**コードの解説:**
+
+1.  **`async function MyPage()`**: このページコンポーネントは、`async`関数として定義されています。これにより、コンポーネント内で`await`を使って非同期処理（データ取得など）を行うことができます。これはServer Componentsの大きな特徴です。
+2.  **`createServerComponentClient`**: Server Components内でSupabaseクライアントを初期化するための関数です。
+3.  **`supabase.auth.getSession()`**: 現在のユーザーセッションを取得します。`session`がなければ未ログインと判断し、`next/navigation`の`redirect`関数を使って`/login`ページに強制的に遷移させます。これにより、このページがログインユーザー専用になります。
+4.  **`supabase.from("favorites").select("*")`**: `favorites`テーブルからデータを取得します。RLSポリシー（`auth.uid() = user_id`）が有効になっているため、Supabaseは自動的に現在ログインしているユーザーのお気に入りデータのみを返してくれます。これがRLSの強力な点です。
+5.  取得した`favorites`データを`map`で展開し、一覧表示しています。
+
+=== ホームページのお気に入りボタンの完成
+
+マイページでお気に入り一覧が取得できたので、このロジックを応用して、ホームページの検索結果に表示するお気に入りボタンの状態を正しく表示させましょう。
+
+ホームページ（`src/app/page.tsx`）もServer Componentに変更し、サーバーサイドで事前にお気に入り情報を取得するようにします。
+
+```tsx
+# src/app/page.tsx (抜粋)
+import { createServerComponentClient } from "@supabase/auth-helpers-nextjs"
+import { cookies } from "next/headers"
+# ... 他のコンポーネント
+
+export default async function HomePage() {
+  const supabase = createServerComponentClient({ cookies })
+  const { data: { session } } = await supabase.auth.getSession()
+
+  # お気に入り動画IDのリストを取得
+  const { data: favorites } = await supabase.from("favorites").select("video_id")
+  const favoritedVideoIds = favorites?.map(fav => fav.video_id) || []
+
+  return (
+    <div>
+      {/* ... 検索フォームなど */}
+      <SearchResultList session={session} favoritedVideoIds={favoritedVideoIds} />
+    </div>
+  )
+}
+```
+
+このように、ページコンポーネントをServer Componentとし、データ取得ロジックをサーバーサイドに集約します。そして、取得したデータ（`session`やお気に入りIDリスト）を、UI表示責務を持つClient Component（`SearchResultList`など）にpropsとして渡すのが、App Routerにおける基本的な設計パターンです。
+
+（※ `SearchResultList`コンポーネントへのリファクタリングは、本書の範囲を超えるため、ここでは概念的な説明に留めます。）
+
+これで、お気に入り機能の主要な部分が完成しました。次のセクションでは、この機能を支える重要なセキュリティ設定であるRLSについて、改めて詳しく解説します。
+== RLS（Row Level Security）の深掘り
+
+これまでの実装で、`profiles`テーブルと`favorites`テーブルの作成時に、RLS（Row Level Security）を有効にし、いくつかのポリシーを作成しました。このセクションでは、Supabaseの根幹をなすこの強力な機能について、改めてその重要性と仕組みを詳しく解説します。
+
+=== なぜRLSが必要なのか？
+
+Supabaseでは、クライアントサイド（ブラウザ）から直接データベースのデータを読み書きできます。これは開発を非常に高速化しますが、同時に大きなセキュリティリスクも伴います。
+
+もし、何の制限もなければ、悪意のあるユーザーがブラウザの開発者ツールを使い、他人の`user_id`を指定して、その人のお気に入り情報を盗み見たり、勝手に追加・削除したりできてしまいます。
+
+```javascript
+# 悪意のあるコードの例（もしRLSがなければ...）
+
+# 他人のIDを指定して、その人のお気に入りを全て取得
+supabase.from('favorites').select('*').eq('user_id', '他人のID')
+
+# 他人のIDを使って、勝手にお気に入りを追加
+supabase.from('favorites').insert({ user_id: '他人のID', video_id: '...' })
+```
+
+このような不正な操作を防ぐために、RLSが必要不可欠です。
+
+=== RLS: データベースの番人
+
+RLSを有効にすると、テーブルへの全てのアクセス（`SELECT`, `INSERT`, `UPDATE`, `DELETE`）がデフォルトで拒否されます。そして、「ポリシー」で許可された操作しか実行できなくなります。
+
+ポリシーは、「**誰が**」「**どの行に対して**」「**何をしても良いか**」を定義するルールです。PostgreSQLのデータベースレベルで強制されるため、クライアントからのリクエストがどのようなものであっても、このルールを迂回することはできません。
+
+=== ポリシーの再確認
+
+`favorites`テーブルに設定したポリシーをもう一度見てみましょう。
+
+```sql
+-- 自分のデータしか読み取れない
+create policy "Users can view their own favorites." on public.favorites
+  for select using (auth.uid() = user_id);
+```
+
+この`SELECT`ポリシーは、以下のように解釈できます。
+
+ * **`for select`**: `SELECT`（読み取り）操作に対するルールです。
+ * **`using (auth.uid() = user_id)`**: テーブルの行（レコード）のうち、`user_id`カラムの値が、現在リクエストを行っている認証済みユーザーのID（`auth.uid()`）と等しい行**のみ**を、操作の対象とすることを許可します。
+
+`auth.uid()`は、Supabaseが提供する特殊な関数で、リクエストに付与されたJWT（JSON Web Token）からユーザーIDを安全に抽出して返してくれます。
+
+このポリシーのおかげで、たとえクライアントが `supabase.from('favorites').select('*')` というリクエスト（全てのデータを要求）を送ったとしても、データベースは自動的に `WHERE user_id = 'ログイン中のユーザーID'` という条件を追加して、そのユーザー自身のデータだけを返してくれます。
+
+`INSERT`や`DELETE`のポリシーも同様に、`auth.uid()`を使って操作を自分のデータのみに制限しています。
+
+=== RLSは最後の砦
+
+アプリケーションをセキュアに保つためには、クライアントサイドでのバリデーションや、サーバーサイドでのチェックなど、複数の防御層を設けるのが基本です。しかし、最終的にデータベースへのアクセスを制御するRLSは、最も重要な「最後の砦」と言えます。
+
+Supabaseを使う上で、RLSを正しく理解し、設定することは、安全なアプリケーションを構築するための必須スキルです。
+
+これで第6章は完了です。お気に入り機能の実装を通じて、Supabaseのデータベース操作とセキュリティの基本を学びました。次の章では、開発したアプリケーションを世界に公開する「デプロイ」作業を行います。
